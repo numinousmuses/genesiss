@@ -174,12 +174,15 @@ def cell_config(v: Variant, platform: Platform) -> str:
         BASE_MODEL    = "{v.base}"
         FAMILY        = "{v.family}"                     # qwen3.5 or gpt-oss
 
+        # HF user (override if forking).
+        HF_USER       = "numinousmuses"
+
         # Where checkpoints live on the Hub.  Each `checkpoint-XXXX` folder is a
         # full Trainer save (model.safetensors, optimizer.pt, scheduler.pt,
         # trainer_state.json, etc.) so we can resume mid-step.
-        HUB_CKPT_REPO = f"YOUR_HF_USER/{{VARIANT}}-checkpoints"
+        HUB_CKPT_REPO  = f"{{HF_USER}}/{{VARIANT}}-checkpoints"
         # Final merged model / GGUF goes here.
-        HUB_FINAL_REPO = f"YOUR_HF_USER/{{VARIANT}}"
+        HUB_FINAL_REPO = f"{{HF_USER}}/{{VARIANT}}"
 
         MAX_SEQ_LENGTH               = {v.max_seq_length}
         PER_DEVICE_TRAIN_BATCH_SIZE  = {v.per_device_train_batch_size}
@@ -189,6 +192,12 @@ def cell_config(v: Variant, platform: Platform) -> str:
         LEARNING_RATE                = {v.learning_rate}
         SAVE_STEPS                   = {v.save_steps}
         NUM_EPOCHS                   = 1
+
+        # Sanity-check knob. Set to e.g. 5000 for a quick 10-minute run to
+        # verify the pipeline before spending compute units on the full
+        # ~150k-row train split. Set back to None for production.
+        MAX_TRAIN                    = None
+        MAX_EVAL                     = 2000
 
         # Local dir Trainer writes checkpoints to (then async-pushed to HUB_CKPT_REPO).
         OUTPUT_DIR = f"./outputs/{{VARIANT}}"
@@ -254,12 +263,13 @@ def cell_load_model(v: Variant) -> str:
 
 def cell_dataset() -> str:
     return textwrap.dedent("""\
-        # Load Text-to-CadQuery (ricemonster/NeurIPS11092) and convert to a `text` column
-        # ready for SFTTrainer.  Set max_train=None for full 90% split (~150k rows).
+        # Load Text-to-CadQuery (ricemonster/NeurIPS11092) and convert to a `text`
+        # column ready for SFTTrainer. MAX_TRAIN/MAX_EVAL come from the run-config
+        # cell — MAX_TRAIN=None means the full 90% split (~150k rows).
         from shared.data_loader import load_dataset_dict
         from shared.format import text_field
 
-        ds = load_dataset_dict(max_train=None, max_eval=2000)
+        ds = load_dataset_dict(max_train=MAX_TRAIN, max_eval=MAX_EVAL)
         ds = ds.map(lambda b: {
             "text": [
                 tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=False)
@@ -438,13 +448,16 @@ def build_notebook(v: Variant, platform: Platform) -> dict:
 
     platform_note = (
         "Runs on Colab. Recommended accelerator: "
-        + ({"genesiss-4b": "T4 / L4", "genesiss-9b": "L4 / A100",
-            "genesiss-20b": "A100 / H100", "genesiss-27b": "H100"}[v.slug])
+        + ({"genesiss-4b":  "T4 or L4",
+            "genesiss-9b":  "**H100** (recommended — ~2× faster than A100, similar units/epoch) or A100",
+            "genesiss-20b": "A100 / H100 (fits even on T4×2 if you'd rather use Kaggle)",
+            "genesiss-27b": "**H100** (the only option that fits 27B at 16-bit LoRA)"}[v.slug])
         + "."
         if platform == "colab"
         else "Runs on Kaggle. Recommended accelerator: "
-        + ({"genesiss-4b": "T4 ×2 or P100", "genesiss-9b": "T4 ×2",
-            "genesiss-20b": "T4 ×2 (QLoRA)",
+        + ({"genesiss-4b":  "T4 ×2 or P100",
+            "genesiss-9b":  "T4 ×2 (tight — Colab A100/H100 is faster)",
+            "genesiss-20b": "**T4 ×2** (recommended — QLoRA fits on one T4, free)",
             "genesiss-27b": "**not feasible on Kaggle** — open the Colab H100 notebook instead"}[v.slug])
         + "."
     )
