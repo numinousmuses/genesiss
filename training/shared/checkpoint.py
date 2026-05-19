@@ -1,26 +1,34 @@
-"""Checkpoint persistence helpers — resume on launch, async-push during training.
+"""Session-survival helpers for long training runs.
 
-Resume on launch:
-    pull_latest_checkpoint(repo_id, output_dir)
-        — looks for the highest checkpoint-XXXX subfolder on the Hub and
-          downloads it into output_dir/checkpoint-XXXX so SFTTrainer's
-          resume_from_checkpoint=True picks it up automatically.
+Three pieces, all surviving Colab/Kaggle session timeouts:
 
-Async push during training:
-    HubCheckpointCallback(repo_id, output_dir)
-        — TrainerCallback fired by HuggingFace Trainer on every save. It
-          submits the freshly-written checkpoint folder to HfApi using
-          run_as_future=True so the upload runs in a background thread and
-          training is NOT blocked.
+  pull_latest_checkpoint(repo_id, output_dir)
+      Looks for the highest checkpoint-XXXX subfolder on the Hub and
+      downloads it into output_dir/checkpoint-XXXX so SFTTrainer's
+      resume_from_checkpoint=True picks it up automatically.
 
-These two pieces together let a Colab/Kaggle session die at any point and
-resume on the next session without losing more than the last save_steps.
+  make_hub_callback(repo_id, output_dir)
+      TrainerCallback fired on every save. Submits the freshly-written
+      checkpoint folder to HfApi using run_as_future=True so the upload
+      runs in a background thread and training is NOT blocked.
+
+  make_time_budget_callback(max_seconds)
+      TrainerCallback that stops training cleanly when a wall-clock budget
+      is exhausted (default 23h — leaves headroom under Colab's 24h idle
+      kick). Forces a final save before signalling stop, so the last
+      checkpoint reaches HF Hub. The budget resets on every train() call,
+      so each resumed session gets a fresh window.
+
+Together: a notebook that dies (idle kick, OOM, network blip) loses at
+most `save_steps` of progress, and a run too big for one session
+automatically self-terminates with a clean save before getting killed.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
+import time
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Optional
@@ -148,3 +156,48 @@ def make_hub_callback(repo_id: str, output_dir: str | os.PathLike, token: Option
                     log.warning("final upload failed: %s", e)
 
     return HubCheckpointCallback()
+
+
+# ---------------------------------------------------------------------------
+# Wall-clock time budget — stop cleanly before Colab idle-kicks the runtime
+# ---------------------------------------------------------------------------
+def make_time_budget_callback(max_seconds: float = 23 * 3600):
+    """Return a TrainerCallback that signals a graceful stop after `max_seconds`.
+
+    The budget resets on every `trainer.train()` call — meaning each resumed
+    session starts with a fresh window. Combined with `resume_from_checkpoint`,
+    a multi-session run looks like:
+        session 1 (23h) → save → terminate → upload finishes
+        session 2 (23h) → resume from last checkpoint → save → ...
+    until num_train_epochs is reached or you stop kicking off sessions.
+
+    When the budget expires, the callback sets `control.should_save = True`
+    and `control.should_training_stop = True`, so Trainer does one final
+    save and the HubCheckpointCallback uploads it before train() returns.
+    """
+    from transformers import TrainerCallback
+
+    class TimeBudgetCallback(TrainerCallback):
+        def __init__(self):
+            self._start: Optional[float] = None
+            self._fired = False
+
+        def on_train_begin(self, args, state, control, **_):
+            self._start = time.monotonic()
+            self._fired = False
+            log.info("time budget: %.0fs (%.1fh)", max_seconds, max_seconds / 3600)
+
+        def on_step_end(self, args, state, control, **_):
+            if self._start is None or self._fired:
+                return
+            elapsed = time.monotonic() - self._start
+            if elapsed >= max_seconds:
+                self._fired = True
+                log.warning(
+                    "time budget exhausted at step %d (%.1fh elapsed) — saving + stopping",
+                    state.global_step, elapsed / 3600,
+                )
+                control.should_save = True
+                control.should_training_stop = True
+
+    return TimeBudgetCallback()

@@ -238,13 +238,22 @@ def cell_config(v: Variant, platform: Platform) -> str:
         LORA_ALPHA                   = {v.lora_alpha}
         LEARNING_RATE                = {v.learning_rate}
         SAVE_STEPS                   = {v.save_steps}
-        NUM_EPOCHS                   = 1
+        # Unsloth LoRA guide says 1-3 epochs, diminishing returns past 3.
+        # Trainer is bounded by MAX_TRAIN_SECONDS below, so set 3 epochs as
+        # the upper limit — actual stop happens whichever comes first.
+        NUM_EPOCHS                   = 3
 
         # Sanity-check knob. Set to e.g. 5000 for a quick 10-minute run to
         # verify the pipeline before spending compute units on the full
         # ~380k-row combined train split. Set back to None for production.
         MAX_TRAIN                    = None
         MAX_EVAL                     = 2000
+
+        # Hard wall-clock budget per session. Colab's idle kick is ~24h on
+        # Pro+; 23h leaves headroom for the final save + HF upload. When the
+        # budget expires the trainer saves cleanly and stops — re-running the
+        # notebook resumes from the last checkpoint with a fresh budget.
+        MAX_TRAIN_SECONDS            = 23 * 3600
 
         # Local dir Trainer writes checkpoints to (then async-pushed to HUB_CKPT_REPO).
         OUTPUT_DIR = f"./outputs/{{VARIANT}}"
@@ -341,9 +350,10 @@ def cell_dataset() -> str:
 def cell_trainer() -> str:
     return textwrap.dedent("""\
         from trl import SFTTrainer, SFTConfig
-        from shared.checkpoint import make_hub_callback
+        from shared.checkpoint import make_hub_callback, make_time_budget_callback
 
-        hub_cb = make_hub_callback(HUB_CKPT_REPO, OUTPUT_DIR, token=os.environ["HF_TOKEN"])
+        hub_cb     = make_hub_callback(HUB_CKPT_REPO, OUTPUT_DIR, token=os.environ["HF_TOKEN"])
+        budget_cb  = make_time_budget_callback(max_seconds=MAX_TRAIN_SECONDS)
 
         trainer = SFTTrainer(
             model = model,
@@ -377,7 +387,7 @@ def cell_trainer() -> str:
                 report_to = "none",
                 dataset_num_proc = 2,
             ),
-            callbacks = [hub_cb],
+            callbacks = [hub_cb, budget_cb],
         )
         """)
 
