@@ -168,6 +168,18 @@ def cell_shared(platform: Platform) -> str:
 
 
 def cell_config(v: Variant, platform: Platform) -> str:
+    # Platform-specific hyperparameter overrides. The Variant defaults are
+    # tuned for the smallest realistic GPU; if Colab is the target and the
+    # variant is one we recommend running on H100, we bump per-device batch
+    # size (keeping effective batch ≈ 16) for a ~4× wall-clock win.
+    bs = v.per_device_train_batch_size
+    ga = v.gradient_accumulation_steps
+    note = ""
+    if platform == "colab" and v.slug in ("genesiss-9b", "genesiss-20b"):
+        # H100 has 80GB — plenty of room to keep more samples in-device per
+        # step rather than gradient-accumulating across many micro-batches.
+        bs, ga = 4, 4   # effective batch = 16, same as before
+        note = "  # H100-tuned: same effective batch as Kaggle, 4× faster wall clock"
     return textwrap.dedent(f"""\
         # ---- run config ---------------------------------------------------------
         VARIANT       = "{v.slug}"
@@ -185,8 +197,8 @@ def cell_config(v: Variant, platform: Platform) -> str:
         HUB_FINAL_REPO = f"{{HF_USER}}/{{VARIANT}}"
 
         MAX_SEQ_LENGTH               = {v.max_seq_length}
-        PER_DEVICE_TRAIN_BATCH_SIZE  = {v.per_device_train_batch_size}
-        GRADIENT_ACCUMULATION_STEPS  = {v.gradient_accumulation_steps}
+        PER_DEVICE_TRAIN_BATCH_SIZE  = {bs}{note}
+        GRADIENT_ACCUMULATION_STEPS  = {ga}
         LORA_R                       = {v.lora_r}
         LORA_ALPHA                   = {v.lora_alpha}
         LEARNING_RATE                = {v.learning_rate}
@@ -195,7 +207,7 @@ def cell_config(v: Variant, platform: Platform) -> str:
 
         # Sanity-check knob. Set to e.g. 5000 for a quick 10-minute run to
         # verify the pipeline before spending compute units on the full
-        # ~150k-row train split. Set back to None for production.
+        # ~380k-row combined train split. Set back to None for production.
         MAX_TRAIN                    = None
         MAX_EVAL                     = 2000
 
@@ -454,14 +466,14 @@ def build_notebook(v: Variant, platform: Platform) -> dict:
         "Runs on Colab. Recommended accelerator: "
         + ({"genesiss-4b":  "T4 or L4",
             "genesiss-9b":  "**H100** (recommended — ~2× faster than A100, similar units/epoch) or A100",
-            "genesiss-20b": "A100 / H100 (fits even on T4×2 if you'd rather use Kaggle)",
+            "genesiss-20b": "**H100** (recommended — H100-tuned batch size; A100 also works)",
             "genesiss-27b": "**H100** (the only option that fits 27B at 16-bit LoRA)"}[v.slug])
         + "."
         if platform == "colab"
         else "Runs on Kaggle. Recommended accelerator: "
         + ({"genesiss-4b":  "T4 ×2 or P100",
             "genesiss-9b":  "T4 ×2 (tight — Colab A100/H100 is faster)",
-            "genesiss-20b": "**T4 ×2** (recommended — QLoRA fits on one T4, free)",
+            "genesiss-20b": "T4 ×2 (QLoRA fits on one T4, free — but H100 is faster)",
             "genesiss-27b": "**not feasible on Kaggle** — open the Colab H100 notebook instead"}[v.slug])
         + "."
     )
