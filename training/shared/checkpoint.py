@@ -37,11 +37,18 @@ _CKPT_RE = re.compile(r"^checkpoint-(\d+)$")
 def _latest_remote_checkpoint(repo_id: str, token: Optional[str]) -> Optional[str]:
     """Inspect repo file list, return the name of the latest checkpoint-XXXX dir, or None."""
     from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError
 
     api = HfApi(token=token)
     try:
         files = api.list_repo_files(repo_id=repo_id, repo_type="model")
+    except RepositoryNotFoundError:
+        # Expected on the very first run — the repo gets auto-created by the
+        # HubCheckpointCallback on the first save. Don't alarm the user.
+        log.info("%s doesn't exist yet — starting fresh", repo_id)
+        return None
     except Exception as e:
+        # Other failures (auth, network) are real and worth flagging loudly.
         log.warning("could not list %s: %s (assuming no prior checkpoint)", repo_id, e)
         return None
 
