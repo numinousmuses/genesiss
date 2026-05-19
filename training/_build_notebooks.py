@@ -126,33 +126,49 @@ def cell_install(platform: Platform) -> str:
 
 
 def cell_token(platform: Platform) -> str:
-    if platform == "colab":
-        return textwrap.dedent("""\
-            # Pull HF_TOKEN from Colab userdata.  Settings → Secrets → add `HF_TOKEN`.
-            import os
-            try:
-                from google.colab import userdata
-                os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
-            except Exception:
-                # Fallback: paste your token here if you really must.
-                os.environ.setdefault("HF_TOKEN", "")
-            assert os.environ.get("HF_TOKEN"), "HF_TOKEN not set"
-
-            from huggingface_hub import login
-            login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
-            """)
+    # Try multiple sources in order so the same cell works whether you're
+    # running in the Colab browser UI, in VS Code/JupyterLab against a Colab
+    # kernel, or on Kaggle. Static type checkers (Pylance/Pyright) flag
+    # `google.colab` / `kaggle_secrets` as unresolved when running locally —
+    # the `# type: ignore` comments silence that without affecting runtime.
     return textwrap.dedent("""\
-        # Pull HF_TOKEN from Kaggle secrets.  Add-ons → Secrets → add `HF_TOKEN`.
         import os
-        try:
-            from kaggle_secrets import UserSecretsClient
-            os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
-        except Exception:
-            os.environ.setdefault("HF_TOKEN", "")
-        assert os.environ.get("HF_TOKEN"), "HF_TOKEN not set"
+
+        def _load_hf_token() -> str | None:
+            # 1) Already in the environment (VS Code `.env`, shell export,
+            #    runtime env var passed in by an orchestrator, etc).
+            tok = os.environ.get("HF_TOKEN")
+            if tok:
+                return tok
+            # 2) Colab secret (browser UI: 🔑 sidebar → Add secret).
+            try:
+                from google.colab import userdata  # type: ignore[import-not-found]
+                tok = userdata.get("HF_TOKEN")
+                if tok:
+                    return tok
+            except Exception:
+                pass
+            # 3) Kaggle secret (Add-ons → Secrets).
+            try:
+                from kaggle_secrets import UserSecretsClient  # type: ignore[import-not-found]
+                return UserSecretsClient().get_secret("HF_TOKEN")
+            except Exception:
+                pass
+            return None
+
+        token = _load_hf_token()
+        if not token:
+            raise RuntimeError(
+                "HF_TOKEN not found. Set it via ONE of:\\n"
+                "  - Colab browser: 🔑 sidebar → Add secret `HF_TOKEN` (works for VS Code/Jupyter too once set)\\n"
+                "  - Kaggle: Add-ons → Secrets → add `HF_TOKEN`\\n"
+                "  - Shell:  export HF_TOKEN=hf_xxx  (then restart the kernel)"
+            )
+        os.environ["HF_TOKEN"] = token
 
         from huggingface_hub import login
-        login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
+        login(token=token, add_to_git_credential=False)
+        print("[hf] logged in")
         """)
 
 
