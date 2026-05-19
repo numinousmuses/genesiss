@@ -127,7 +127,7 @@ def cell_shared(platform: Platform) -> str:
         # If you've cloned the repo into {work}, you can skip this cell and just
         # `import sys; sys.path.insert(0, "{work}/genesiss/training")`.
         import os, urllib.request, sys
-        SHARED_BASE = "https://raw.githubusercontent.com/REPLACE_ME/genesiss/main/training/shared"
+        SHARED_BASE = "https://raw.githubusercontent.com/numinousmuses/genesiss/main/training/shared"
         TARGET = "{work}/shared"
         os.makedirs(TARGET, exist_ok=True)
         for fname in ["__init__.py", "data_loader.py", "format.py", "checkpoint.py"]:
