@@ -215,6 +215,14 @@ def cell_config(v: Variant, platform: Platform) -> str:
         # step rather than gradient-accumulating across many micro-batches.
         bs, ga = 4, 4   # effective batch = 16, same as before
         note = "  # H100-tuned: same effective batch as Kaggle, 4× faster wall clock"
+
+    # Default attention implementation per variant.
+    # - Qwen 3.5: None lets transformers pick (FA2 on H100, xformers on
+    #   Blackwell — both fine).
+    # - gpt-oss-20b: GptOssForCausalLM has no SDPA path in current transformers,
+    #   so on hardware without working FA2 we MUST force eager. On H100 FA2
+    #   works and is much faster — flip ATTN_IMPLEMENTATION to None there.
+    attn_default = "eager" if v.family == "gpt-oss" else None
     return textwrap.dedent(f"""\
         # ---- run config ---------------------------------------------------------
         VARIANT       = "{v.slug}"
@@ -255,6 +263,40 @@ def cell_config(v: Variant, platform: Platform) -> str:
         # notebook resumes from the last checkpoint with a fresh budget.
         MAX_TRAIN_SECONDS            = 23 * 3600
 
+        # Attention implementation.
+        #   None              → let transformers pick (FA2 → SDPA → eager)
+        #   "flash_attention_2" → force FA2 (fastest, only works on Ampere/Hopper)
+        #   "eager"           → slow fallback; needed for gpt-oss when FA2 is
+        #                       unavailable, because transformers 5.5.x has no
+        #                       SDPA path for GptOssForCausalLM.
+        #
+        # We auto-detect: if the GPU is Hopper-class (H100/H200) or newer with
+        # working FA2, prefer FA2 — even for gpt-oss, this is what makes 20B
+        # finish in one session instead of three. On Blackwell ("G4") FA2 wheels
+        # aren't built yet, so we fall back to the safe-but-slow eager path for
+        # gpt-oss. Qwen 3.5 can use xformers as a third option so it stays None.
+        def _auto_attn_for_family(family: str) -> str | None:
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    return None
+                name = torch.cuda.get_device_name(0).lower()
+                # Hopper / Ada / Ampere have working FA2 wheels in current builds.
+                # Hopper / Ampere / Ada — known-good FA2 wheels.
+                # Intentionally excludes Blackwell (RTX PRO 6000 / "G4" on Colab)
+                # — FA2 isn't built for those yet (saw this fail on the 20B run).
+                fa2_supported = any(x in name for x in ("h100", "h200", "a100", "l4", "l40"))
+            except Exception:
+                return None
+            if fa2_supported:
+                return "flash_attention_2"
+            # No working FA2: gpt-oss needs eager (no SDPA path); Qwen 3.5 can
+            # fall back to xformers via the default (None).
+            return "eager" if family == "gpt-oss" else None
+
+        ATTN_IMPLEMENTATION          = _auto_attn_for_family(FAMILY)
+        print(f"[attn] picked {{ATTN_IMPLEMENTATION!r}} for {{FAMILY}} on this GPU")
+
         # Local dir Trainer writes checkpoints to (then async-pushed to HUB_CKPT_REPO).
         OUTPUT_DIR = f"./outputs/{{VARIANT}}"
         """)
@@ -288,21 +330,23 @@ def cell_load_model(v: Variant) -> str:
             os.environ.setdefault("UNSLOTH_MOE_BACKEND", "grouped_mm")
 
             """)
-        # transformers ≥5.x doesn't expose an SDPA path for GptOssForCausalLM
-        # (raises ValueError if you let it default). FA2 is broken on Blackwell.
-        # Eager attention is slower per step but loads cleanly on every GPU.
         load_kwargs = """\
             max_seq_length = MAX_SEQ_LENGTH,
             load_in_4bit = True,
-            full_finetuning = False,
-            attn_implementation = "eager","""
+            full_finetuning = False,"""
     return preamble + textwrap.dedent(f"""\
         from unsloth import FastLanguageModel
 
-        model, tokenizer = FastLanguageModel.from_pretrained(
+        # Pass attn_implementation only when ATTN_IMPLEMENTATION is set (None
+        # means: let transformers pick the best available — FA2 → SDPA → eager).
+        _load_kwargs = dict(
             model_name = BASE_MODEL,
         {load_kwargs}
         )
+        if ATTN_IMPLEMENTATION is not None:
+            _load_kwargs["attn_implementation"] = ATTN_IMPLEMENTATION
+
+        model, tokenizer = FastLanguageModel.from_pretrained(**_load_kwargs)
 
         model = FastLanguageModel.get_peft_model(
             model,
