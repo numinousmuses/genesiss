@@ -109,34 +109,76 @@ training/        # Unsloth finetuning
 docs/            - architecture.md, training.md
 ```
 
-## Quickstart
+## Install
 
 Prereqs: [uv](https://docs.astral.sh/uv/), [pnpm](https://pnpm.io/), and [Ollama](https://ollama.com/) on `PATH`.
 
+### Install `genesiss` system-wide
+
+`uv tool install` creates an isolated environment for the CLI and puts the `genesiss` executable on your `PATH` — so you can run it from anywhere on your machine, not just inside a checkout of this repo.
+
 ```bash
-# 1. Python backend — uv reads pyproject.toml, creates .venv, installs deps + dev tools
-uv sync
+# Straight from GitHub (no clone needed)
+uv tool install git+https://github.com/numinousmuses/genesiss
 
-# 2. Frontend
-(cd frontend && pnpm install)
+# …or from a local clone
+git clone https://github.com/numinousmuses/genesiss && cd genesiss
+uv tool install .
 
-# 3. Make sure Ollama is up
-ollama serve &
+# Make sure ~/.local/bin (where uv puts tool shims) is on PATH
+uv tool update-shell
+exec $SHELL -l
 
-# 4. Pull a trained variant (once you've finetuned + pushed)
-uv run genesiss models pull genesiss-4b
-
-# 5. Launch (GUI by default)
-uv run genesiss
-
-# Headless TUI in the terminal
-uv run genesiss --headless
-
-# Make headless the default
-uv run genesiss config set default-mode headless
+# Sanity check
+genesiss --help
 ```
 
-> Tip: `uv run <cmd>` auto-activates `.venv` for that command. If you prefer a sourced venv, `source .venv/bin/activate` and then `genesiss` directly works too.
+To upgrade later: `uv tool upgrade genesiss`. To remove: `uv tool uninstall genesiss`.
+
+### Frontend (Electron) one-time setup
+
+The GUI is an Electron app that lives alongside the CLI. The system-installed `genesiss` looks for it relative to a clone of this repo, so you still want the repo on disk for GUI mode:
+
+```bash
+git clone https://github.com/numinousmuses/genesiss ~/code/genesiss
+cd ~/code/genesiss/frontend && pnpm install
+# tell genesiss where the frontend lives
+genesiss config set frontend-dir ~/code/genesiss/frontend
+```
+
+If you only ever use the headless TUI, you can skip the frontend setup entirely.
+
+### Run it
+
+```bash
+# 1. Make sure Ollama is up
+ollama serve &
+
+# 2. Pull a trained variant
+genesiss models pull genesiss-4b
+
+# 3. Launch (GUI by default)
+genesiss
+
+# Headless TUI
+genesiss --headless
+
+# Make headless the default
+genesiss config set default-mode headless
+```
+
+## Develop
+
+For hacking on the codebase itself, work inside a clone with `uv sync` instead of `uv tool install` — that gives you an editable install and dev deps (pytest, ruff, mypy).
+
+```bash
+git clone https://github.com/numinousmuses/genesiss && cd genesiss
+uv sync                          # creates .venv with deps + dev tools
+(cd frontend && pnpm install)
+uv run genesiss --help           # runs the in-repo source
+```
+
+`uv run <cmd>` auto-activates `.venv` for that command. Equivalent shell-style: `source .venv/bin/activate && genesiss …`.
 
 ## Training
 

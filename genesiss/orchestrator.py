@@ -57,16 +57,29 @@ def _start_bridge_in_thread(cfg: Config) -> threading.Thread:
     raise SystemExit("bridge failed to come up within 10s")
 
 
-def _frontend_dir() -> Path:
-    here = Path(__file__).resolve().parents[1]
-    return here / "frontend"
+def _frontend_dir(cfg: Config) -> Path:
+    """Locate the Electron frontend.
+
+    Preference order:
+      1. cfg.frontend_dir / $GENESISS_FRONTEND_DIR (set by `genesiss config set frontend-dir …`)
+      2. <repo>/frontend, when running from a source checkout (dev mode).
+    """
+    if cfg.frontend_dir:
+        return Path(cfg.frontend_dir)
+    return Path(__file__).resolve().parents[1] / "frontend"
 
 
 def _spawn_electron(cfg: Config) -> subprocess.Popen[bytes]:
-    fdir = _frontend_dir()
+    fdir = _frontend_dir(cfg)
     pkg = fdir / "package.json"
     if not pkg.exists():
-        raise SystemExit(f"frontend not found at {fdir}. Did you `pnpm install` inside frontend/?")
+        raise SystemExit(
+            f"frontend not found at {fdir}.\n"
+            "If you installed genesiss via `uv tool install`, clone the repo and run:\n"
+            "    cd <repo>/frontend && pnpm install\n"
+            "    genesiss config set frontend-dir <repo>/frontend\n"
+            "Or use the TUI: `genesiss --headless`."
+        )
 
     runner = shutil.which("pnpm") or shutil.which("npm")
     if runner is None:
