@@ -37,17 +37,24 @@ SYSTEM_PROMPT = (
 # ricemonster/NeurIPS11092 — raw JSONL files
 # ---------------------------------------------------------------------------
 def _download_ricemonster_jsonl(cache_dir: Optional[str] = None) -> dict[str, str]:
+    """Pull data_train.jsonl + data_val.jsonl from ricemonster/NeurIPS11092.
+
+    Quirk: the Text-to-CadQuery authors host the dataset inside a MODEL repo
+    (not a dataset repo) and under a `data/` subdirectory. HF API confirms
+    the siblings list as data/data_train.jsonl, data/data_val.jsonl,
+    data/data_test.jsonl. So we use repo_type="model" and the data/ prefix.
+    """
     from huggingface_hub import hf_hub_download
 
     out: dict[str, str] = {}
     for split, fname in [
-        ("train", "data_train.jsonl"),
-        ("validation", "data_val.jsonl"),
+        ("train", "data/data_train.jsonl"),
+        ("validation", "data/data_val.jsonl"),
     ]:
         out[split] = hf_hub_download(
             repo_id=DATASET_RICEMONSTER,
             filename=fname,
-            repo_type="dataset",
+            repo_type="model",
             cache_dir=cache_dir,
         )
     return out
