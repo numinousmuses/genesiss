@@ -77,8 +77,15 @@ def code(src: str) -> dict:
 # Cell content (platform-aware)
 # ---------------------------------------------------------------------------
 def cell_install(platform: Platform) -> str:
+    # Workaround for Unsloth's UTF-8 locale gotcha on some Colab/Kaggle
+    # runtimes (per the troubleshooting doc) — must run BEFORE any unsloth
+    # import, so we tuck it into the install cell.
+    locale_fix = textwrap.dedent("""\
+        import locale
+        locale.getpreferredencoding = lambda: "UTF-8"
+        """)
     if platform == "colab":
-        return textwrap.dedent("""\
+        return locale_fix + textwrap.dedent("""\
             # Install Unsloth and friends. Colab — quiet install.
             %%capture
             !pip install --upgrade --quiet pip
@@ -86,9 +93,12 @@ def cell_install(platform: Platform) -> str:
             !pip install --upgrade --quiet --no-deps "trl<0.10" peft accelerate bitsandbytes
             !pip install --upgrade --quiet "huggingface_hub>=0.25" datasets tomli_w
             """)
-    return textwrap.dedent("""\
+    return locale_fix + textwrap.dedent("""\
         # Install Unsloth and friends — Kaggle.
-        # Kaggle's CUDA preinstall is fine; we just bring in unsloth + trl + datasets.
+        # Note: Kaggle T4×2 sessions expose 2 GPUs, but a vanilla notebook only
+        # uses one. To actually use both, save this code as train.py and run
+        # `!torchrun --nproc_per_node=2 train.py` — Unsloth auto-enables DDP
+        # when launched under torchrun. The notebook-as-is uses GPU 0 only.
         !pip install --quiet --upgrade pip
         !pip install --quiet --upgrade "unsloth @ git+https://github.com/unslothai/unsloth.git"
         !pip install --quiet --upgrade --no-deps "trl<0.10" peft accelerate bitsandbytes
@@ -198,6 +208,7 @@ def cell_resume() -> str:
 def cell_load_model(v: Variant) -> str:
     if v.family == "qwen3.5":
         # Unsloth says: don't QLoRA Qwen 3.5; use 16-bit LoRA.
+        preamble = ""
         load_kwargs = """\
             max_seq_length = MAX_SEQ_LENGTH,
             load_in_4bit = False,
@@ -205,11 +216,18 @@ def cell_load_model(v: Variant) -> str:
             full_finetuning = False,"""
     else:
         # gpt-oss-20b: 4-bit fits on a single 16GB card (~14GB used).
+        # The MoE backend env var enables Unsloth's split-LoRA optimization;
+        # docs claim ~35% less VRAM and up to 12x faster MoE training.
+        preamble = textwrap.dedent("""\
+            import os
+            os.environ.setdefault("UNSLOTH_MOE_BACKEND", "grouped_mm")
+
+            """)
         load_kwargs = """\
             max_seq_length = MAX_SEQ_LENGTH,
             load_in_4bit = True,
             full_finetuning = False,"""
-    return textwrap.dedent(f"""\
+    return preamble + textwrap.dedent(f"""\
         from unsloth import FastLanguageModel
 
         model, tokenizer = FastLanguageModel.from_pretrained(
@@ -322,6 +340,10 @@ def cell_export(v: Variant) -> str:
 
             # 2) GGUF + auto-generated Modelfile (Unsloth writes both into the
             #    same directory; the Modelfile bakes in the trained chat template).
+            # If save_pretrained_gguf crashes mid-export, drop
+            # maximum_memory_usage to 0.5 per Unsloth's troubleshooting guide:
+            #     model.save_pretrained_gguf(GGUF_DIR, tokenizer,
+            #         quantization_method="q4_k_m", maximum_memory_usage=0.5)
             GGUF_DIR = f"./gguf-{VARIANT}"
             model.save_pretrained_gguf(
                 GGUF_DIR, tokenizer,
