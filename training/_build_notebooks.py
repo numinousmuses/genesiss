@@ -279,10 +279,14 @@ def cell_load_model(v: Variant) -> str:
             os.environ.setdefault("UNSLOTH_MOE_BACKEND", "grouped_mm")
 
             """)
+        # transformers ≥5.x doesn't expose an SDPA path for GptOssForCausalLM
+        # (raises ValueError if you let it default). FA2 is broken on Blackwell.
+        # Eager attention is slower per step but loads cleanly on every GPU.
         load_kwargs = """\
             max_seq_length = MAX_SEQ_LENGTH,
             load_in_4bit = True,
-            full_finetuning = False,"""
+            full_finetuning = False,
+            attn_implementation = "eager","""
     return preamble + textwrap.dedent(f"""\
         from unsloth import FastLanguageModel
 
