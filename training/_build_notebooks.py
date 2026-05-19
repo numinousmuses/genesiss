@@ -367,7 +367,8 @@ def cell_trainer() -> str:
                 save_strategy = "steps",
                 save_steps = SAVE_STEPS,
                 save_total_limit = 2,
-                evaluation_strategy = "steps",
+                # Newer transformers renamed evaluation_strategy → eval_strategy.
+                eval_strategy = "steps",
                 eval_steps = SAVE_STEPS,
                 report_to = "none",
                 dataset_num_proc = 2,
