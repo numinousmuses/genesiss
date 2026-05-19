@@ -105,7 +105,9 @@ def cell_install(platform: Platform) -> str:
                 "unsloth @ git+https://github.com/unslothai/unsloth.git" \\
                 "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git"
             # Step 3: extras we use directly (not in unsloth's deps).
-            !pip install --upgrade --quiet "huggingface_hub>=0.25" tomli_w
+            # `kernels` lets gpt-oss use FA3 (kernels-community/vllm-flash-attn3) —
+            # it's a no-op for Qwen 3.5 but makes 20B vastly faster on H100/A100.
+            !pip install --upgrade --quiet "huggingface_hub>=0.25" tomli_w kernels
             """)
     # Kaggle: same recipe, no %%capture (Kaggle convention is to show output).
     return textwrap.dedent("""\
@@ -263,39 +265,40 @@ def cell_config(v: Variant, platform: Platform) -> str:
         # notebook resumes from the last checkpoint with a fresh budget.
         MAX_TRAIN_SECONDS            = 23 * 3600
 
-        # Attention implementation.
-        #   None              → let transformers pick (FA2 → SDPA → eager)
-        #   "flash_attention_2" → force FA2 (fastest, only works on Ampere/Hopper)
-        #   "eager"           → slow fallback; needed for gpt-oss when FA2 is
-        #                       unavailable, because transformers 5.5.x has no
-        #                       SDPA path for GptOssForCausalLM.
+        # Attention implementation — auto-detected by what's actually
+        # importable in this runtime, not just by GPU model. Empirically the
+        # Colab Python env doesn't always have flash-attn installed even on
+        # GPUs that support FA2, and gpt-oss doesn't accept FA2 at all (it
+        # wants FA3 via the `kernels` package). So we probe imports.
         #
-        # We auto-detect: if the GPU is Hopper-class (H100/H200) or newer with
-        # working FA2, prefer FA2 — even for gpt-oss, this is what makes 20B
-        # finish in one session instead of three. On Blackwell ("G4") FA2 wheels
-        # aren't built yet, so we fall back to the safe-but-slow eager path for
-        # gpt-oss. Qwen 3.5 can use xformers as a third option so it stays None.
+        # Decision matrix:
+        #   gpt-oss + kernels installed → kernels-community/vllm-flash-attn3
+        #   gpt-oss + no kernels        → eager (slow but always works)
+        #   qwen3.5 + flash_attn import → flash_attention_2
+        #   qwen3.5 + no flash_attn     → None (xformers fallback, works)
         def _auto_attn_for_family(family: str) -> str | None:
             try:
-                import torch
-                if not torch.cuda.is_available():
-                    return None
-                name = torch.cuda.get_device_name(0).lower()
-                # Hopper / Ada / Ampere have working FA2 wheels in current builds.
-                # Hopper / Ampere / Ada — known-good FA2 wheels.
-                # Intentionally excludes Blackwell (RTX PRO 6000 / "G4" on Colab)
-                # — FA2 isn't built for those yet (saw this fail on the 20B run).
-                fa2_supported = any(x in name for x in ("h100", "h200", "a100", "l4", "l40"))
+                import flash_attn  # noqa: F401
+                fa2_ok = True
             except Exception:
-                return None
-            if fa2_supported:
-                return "flash_attention_2"
-            # No working FA2: gpt-oss needs eager (no SDPA path); Qwen 3.5 can
-            # fall back to xformers via the default (None).
-            return "eager" if family == "gpt-oss" else None
+                fa2_ok = False
+            try:
+                import kernels  # noqa: F401
+                kernels_ok = True
+            except Exception:
+                kernels_ok = False
+
+            if family == "gpt-oss":
+                # transformers 5.5.x: GptOss doesn't support FA2 or SDPA.
+                # FA3 via kernels is the fast path; eager is the safe fallback.
+                if kernels_ok:
+                    return "kernels-community/vllm-flash-attn3"
+                return "eager"
+            # Qwen 3.5: prefer FA2, else let transformers fall back to xformers.
+            return "flash_attention_2" if fa2_ok else None
 
         ATTN_IMPLEMENTATION          = _auto_attn_for_family(FAMILY)
-        print(f"[attn] picked {{ATTN_IMPLEMENTATION!r}} for {{FAMILY}} on this GPU")
+        print(f"[attn] picked {{ATTN_IMPLEMENTATION!r}} for {{FAMILY}}")
 
         # Local dir Trainer writes checkpoints to (then async-pushed to HUB_CKPT_REPO).
         OUTPUT_DIR = f"./outputs/{{VARIANT}}"
