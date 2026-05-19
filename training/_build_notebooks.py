@@ -248,10 +248,11 @@ def cell_config(v: Variant, platform: Platform) -> str:
         LORA_ALPHA                   = {v.lora_alpha}
         LEARNING_RATE                = {v.learning_rate}
         SAVE_STEPS                   = {v.save_steps}
-        # Unsloth LoRA guide says 1-3 epochs, diminishing returns past 3.
-        # Trainer is bounded by MAX_TRAIN_SECONDS below, so set 3 epochs as
-        # the upper limit — actual stop happens whichever comes first.
-        NUM_EPOCHS                   = 3
+        # Unsloth LoRA guide says 1-3 epochs with diminishing returns past 3.
+        # One epoch of the combined ~332k-row dataset is already a LOT of
+        # supervision — typical SFT runs use far less. Bump to 2 only if you
+        # have headroom in your compute-units budget after a 1-epoch baseline.
+        NUM_EPOCHS                   = 1
 
         # Sanity-check knob. Set to e.g. 5000 for a quick 10-minute run to
         # verify the pipeline before spending compute units on the full
@@ -266,17 +267,25 @@ def cell_config(v: Variant, platform: Platform) -> str:
         MAX_TRAIN_SECONDS            = 23 * 3600
 
         # Attention implementation — auto-detected by what's actually
-        # importable in this runtime, not just by GPU model. Empirically the
-        # Colab Python env doesn't always have flash-attn installed even on
-        # GPUs that support FA2, and gpt-oss doesn't accept FA2 at all (it
-        # wants FA3 via the `kernels` package). So we probe imports.
-        #
-        # Decision matrix:
-        #   gpt-oss + kernels installed → kernels-community/vllm-flash-attn3
-        #   gpt-oss + no kernels        → eager (slow but always works)
-        #   qwen3.5 + flash_attn import → flash_attention_2
-        #   qwen3.5 + no flash_attn     → None (xformers fallback, works)
+        # importable AND what the current GPU supports. Two things that
+        # tripped us up on Colab:
+        #   (a) flash-attn isn't pre-installed even on FA2-capable GPUs
+        #   (b) gpt-oss only accepts FA3/FA4, and the FA3 kernel
+        #       (kernels-community/vllm-flash-attn3) requires Hopper —
+        #       fails at runtime on Ampere with "S aux is currently only
+        #       supported for Hopper GPUs".
+        # So we probe both: package availability AND compute capability.
         def _auto_attn_for_family(family: str) -> str | None:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    major = torch.cuda.get_device_capability(0)[0]
+                else:
+                    major = 0
+            except Exception:
+                major = 0
+            is_hopper_or_newer = major >= 9  # H100=9.0, B100/B200=10.0
+
             try:
                 import flash_attn  # noqa: F401
                 fa2_ok = True
@@ -289,12 +298,12 @@ def cell_config(v: Variant, platform: Platform) -> str:
                 kernels_ok = False
 
             if family == "gpt-oss":
-                # transformers 5.5.x: GptOss doesn't support FA2 or SDPA.
-                # FA3 via kernels is the fast path; eager is the safe fallback.
-                if kernels_ok:
+                # FA3 needs both the kernel package AND a Hopper-class GPU.
+                # Anything else → eager (slow but always loads).
+                if kernels_ok and is_hopper_or_newer:
                     return "kernels-community/vllm-flash-attn3"
                 return "eager"
-            # Qwen 3.5: prefer FA2, else let transformers fall back to xformers.
+            # Qwen 3.5: FA2 if the package is importable, else xformers (None).
             return "flash_attention_2" if fa2_ok else None
 
         ATTN_IMPLEMENTATION          = _auto_attn_for_family(FAMILY)
