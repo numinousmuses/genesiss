@@ -112,16 +112,52 @@ def models_list() -> None:
 
 @models_app.command("pull")
 def models_pull(variant: str = typer.Argument(...)) -> None:
-    """Pull a variant's Ollama image."""
+    """Download a finetuned variant from HF and register it with Ollama.
+
+    Pipeline:
+        1. snapshot_download(hf_repo, allow_patterns=["gguf/*"])  → local cache
+        2. ollama create <tag> -f <cache>/gguf/Modelfile
+    """
+    import shutil
+    import subprocess
+
+    from huggingface_hub import snapshot_download
+
     from genesiss.llm.models import REGISTRY
-    from genesiss.llm.ollama import OllamaClient
+    from genesiss.utils.paths import cache_dir
 
     if variant not in REGISTRY:
         raise typer.BadParameter(f"unknown variant: {variant}. Try: {list(REGISTRY)}")
-    cfg = cfg_mod.load()
-    client = OllamaClient(cfg.ollama_host)
-    for evt in client.pull_sync(REGISTRY[variant].ollama_tag):
-        console.print(evt)
+    v = REGISTRY[variant]
+
+    if shutil.which("ollama") is None:
+        raise typer.BadParameter("`ollama` not on PATH. Install from https://ollama.com.")
+
+    target = cache_dir() / "models" / variant
+    target.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"[cyan]downloading[/cyan] {v.hf_repo}/gguf → {target}")
+    snapshot_download(
+        repo_id=v.hf_repo,
+        repo_type="model",
+        allow_patterns=["gguf/*"],
+        local_dir=str(target),
+    )
+
+    modelfile = target / "gguf" / "Modelfile"
+    if not modelfile.exists():
+        raise typer.BadParameter(
+            f"no Modelfile at {modelfile} — did training finish and push to {v.hf_repo}/gguf/?"
+        )
+
+    console.print(f"[cyan]ollama create[/cyan] {v.ollama_tag}")
+    proc = subprocess.run(
+        ["ollama", "create", v.ollama_tag, "-f", str(modelfile)],
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise typer.Exit(proc.returncode)
+    console.print(f"[green]ready[/green] · ollama run {v.ollama_tag}")
 
 
 @models_app.command("use")

@@ -78,7 +78,7 @@ model.save_pretrained_gguf(f"./gguf-{variant}", tokenizer, quantization_method="
 
 For **gpt-oss-20b**, `save_pretrained_gguf` doesn't support the MoE layout, so the gpt-oss notebook follows Unsloth's official gpt-oss tutorial: save merged weights, build llama.cpp, run `convert_hf_to_gguf.py`, quantize with `llama-quantize`, then write the Modelfile from `tokenizer._ollama_modelfile`.
 
-Both flows upload the resulting folder to `HUB_FINAL_REPO/gguf/`. On the user's machine, `genesiss models pull <variant>` (TODO) downloads from there and runs `ollama create <variant> -f <local>/Modelfile`.
+Both flows upload the resulting folder to `HUB_FINAL_REPO/gguf/`. On the user's machine, `genesiss models pull <variant>` calls `huggingface_hub.snapshot_download` with `allow_patterns=["gguf/*"]` and then runs `ollama create <variant> -f <local>/gguf/Modelfile`.
 
 That tag (`genesiss-4b:latest`) is what `genesiss.llm.models.REGISTRY` expects.
 
