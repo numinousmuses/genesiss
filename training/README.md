@@ -65,14 +65,18 @@ Defaults follow [Unsloth's LoRA Hyperparameters Guide](https://unsloth.ai/docs/g
 
 ## Context length
 
-| Variant         | `max_seq_length` | Notes                                                    |
-| --------------- | ---------------- | -------------------------------------------------------- |
-| `genesiss-4b`   | 8192             | Fits T4/L4 comfortably with bs=2.                        |
-| `genesiss-9b`   | 8192             | Fine on L4/A100; tight on T4×2.                          |
-| `genesiss-20b`  | 8192             | QLoRA + flash attn keeps activation memory in budget.    |
-| `genesiss-27b`  | 4096             | 16-bit LoRA at 27B is memory-bound on H100.              |
+All variants default to `max_seq_length = 4096`. Token-length distribution on a 5000-row sample of the combined ricemonster + gudo7208/CAD-Coder train set:
 
-Base-model native context limits are far larger (Qwen 3.5 → 256K, gpt-oss-20b → 128K), so this is purely a training-side budget choice — at inference we can extrapolate moderately past the trained length.
+| stat | tokens |
+| ---- | ------ |
+| median | 656 |
+| p95 | 1765 |
+| p99 | 2636 |
+| max (in sample) | 5234 |
+| % over 4096 | 0.04% (2/5000) |
+| % over 2048 | ~3% |
+
+4096 truncates a negligible 0.04% of rows while halving activation memory vs. 8192 — a roughly 2× wall-clock win per epoch. Base-model native context limits are far larger (Qwen 3.5 → 256K, gpt-oss-20b → 128K), so this is purely a training-side budget choice. At inference, LoRA adapters generalize fine to longer contexts; we can serve multi-part-assembly prompts well past 4K.
 
 ## Hardware mapping
 

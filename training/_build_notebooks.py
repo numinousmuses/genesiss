@@ -26,11 +26,11 @@ class Variant:
     # recommendation of effective batch size ≈ 16 (batch_size × grad_accum) on
     # the smallest realistic GPU for each variant.
     #
-    # max_seq_length is set well above the dataset's natural distribution
-    # (~99% of Text-to-CadQuery rows < 4k tokens) so prompts describing
-    # multi-part assemblies don't get truncated at inference time, but stays
-    # within the activation budget of free-tier GPUs.
-    max_seq_length: int = 8192
+    # max_seq_length=4096 based on a 5000-row diagnostic over the combined
+    # ricemonster + gudo7208/CAD-Coder train set:
+    #   median 656 tokens, p99 = 2636, max = 5234, % over 4096 = 0.04%.
+    # 8192 was ~2× wasted activation memory; 2048 would clip the long tail.
+    max_seq_length: int = 4096
     per_device_train_batch_size: int = 2
     gradient_accumulation_steps: int = 8           # eff. batch = 16
     lora_r: int = 16                               # Unsloth canonical for Qwen 3.5
@@ -48,10 +48,10 @@ VARIANTS = [
     Variant("genesiss-20b", "unsloth/gpt-oss-20b", "gpt-oss",
             per_device_train_batch_size=1, gradient_accumulation_steps=16,
             lora_r=8, lora_alpha=16),
-    # 27B 16-bit LoRA is memory-bound — drop context to keep effective batch
-    # at 16 without going OOM on a single H100.
+    # 27B 16-bit LoRA is memory-bound — the 4096 default fits comfortably on
+    # a single H100; per-device batch stays at 1 because the weights alone
+    # already eat most of the 80GB budget.
     Variant("genesiss-27b", "unsloth/Qwen3.5-27B", "qwen3.5",
-            max_seq_length=4096,
             per_device_train_batch_size=1, gradient_accumulation_steps=16),
 ]
 
