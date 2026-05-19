@@ -77,28 +77,31 @@ def code(src: str) -> dict:
 # Cell content (platform-aware)
 # ---------------------------------------------------------------------------
 def cell_install(platform: Platform) -> str:
-    # Workaround for Unsloth's UTF-8 locale gotcha on some Colab/Kaggle
-    # runtimes (per the troubleshooting doc) — must run BEFORE any unsloth
-    # import, so we tuck it into the install cell.
-    locale_fix = textwrap.dedent("""\
-        import locale
-        locale.getpreferredencoding = lambda: "UTF-8"
-        """)
+    # `%%capture` is a CELL magic — it must be the very first line of the
+    # cell, before any comment or Python statement. We tuck the UTF-8 locale
+    # workaround (per Unsloth's troubleshooting doc) inside the captured
+    # block so it still runs before any later unsloth import.
     if platform == "colab":
-        return locale_fix + textwrap.dedent("""\
-            # Install Unsloth and friends. Colab — quiet install.
+        return textwrap.dedent("""\
             %%capture
+            # Install Unsloth and friends. Colab — quiet install.
+            import locale
+            locale.getpreferredencoding = lambda: "UTF-8"
             !pip install --upgrade --quiet pip
             !pip install --upgrade --quiet "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
             !pip install --upgrade --quiet --no-deps "trl<0.10" peft accelerate bitsandbytes
             !pip install --upgrade --quiet "huggingface_hub>=0.25" datasets tomli_w
             """)
-    return locale_fix + textwrap.dedent("""\
+    # Kaggle: no %%capture (their notebooks don't suppress pip noise by
+    # convention). Plain locale fix + installs.
+    return textwrap.dedent("""\
         # Install Unsloth and friends — Kaggle.
         # Note: Kaggle T4×2 sessions expose 2 GPUs, but a vanilla notebook only
         # uses one. To actually use both, save this code as train.py and run
         # `!torchrun --nproc_per_node=2 train.py` — Unsloth auto-enables DDP
         # when launched under torchrun. The notebook-as-is uses GPU 0 only.
+        import locale
+        locale.getpreferredencoding = lambda: "UTF-8"
         !pip install --quiet --upgrade pip
         !pip install --quiet --upgrade "unsloth @ git+https://github.com/unslothai/unsloth.git"
         !pip install --quiet --upgrade --no-deps "trl<0.10" peft accelerate bitsandbytes
