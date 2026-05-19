@@ -81,21 +81,35 @@ def cell_install(platform: Platform) -> str:
     # cell, before any comment or Python statement. We tuck the UTF-8 locale
     # workaround (per Unsloth's troubleshooting doc) inside the captured
     # block so it still runs before any later unsloth import.
+    #
+    # Install pattern follows Unsloth's canonical Colab recipe:
+    #   1) `pip install unsloth` from PyPI to get a coherent dep tree
+    #      (compatible trl, peft, accelerate, datasets, etc.).
+    #   2) Force-reinstall unsloth + unsloth_zoo from git, --no-deps, to pick
+    #      up the latest fixes without disturbing step-1 deps.
+    #   3) Add anything outside unsloth's transitive deps that we need.
+    # DO NOT pin trl/datasets/peft/accelerate yourself — unsloth_zoo has
+    # narrow version ranges (e.g. trl ∈ [0.18.2, 0.24.0] != 0.19.0,
+    # datasets ∈ [3.4.1, 4.4.0)) and overriding them is what produces the
+    # "incompatible" pip resolver warnings.
     if platform == "colab":
         return textwrap.dedent("""\
             %%capture
-            # Install Unsloth and friends. Colab — quiet install.
             import locale
             locale.getpreferredencoding = lambda: "UTF-8"
+            # Step 1: PyPI unsloth pulls a coherent dep tree.
             !pip install --upgrade --quiet pip
-            !pip install --upgrade --quiet "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
-            !pip install --upgrade --quiet --no-deps "trl<0.10" peft accelerate bitsandbytes
-            !pip install --upgrade --quiet "huggingface_hub>=0.25" datasets tomli_w
+            !pip install --upgrade --quiet unsloth
+            # Step 2: bleeding-edge unsloth + unsloth_zoo from git, deps untouched.
+            !pip install --upgrade --quiet --no-deps --force-reinstall \\
+                "unsloth @ git+https://github.com/unslothai/unsloth.git" \\
+                "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git"
+            # Step 3: extras we use directly (not in unsloth's deps).
+            !pip install --upgrade --quiet "huggingface_hub>=0.25" tomli_w
             """)
-    # Kaggle: no %%capture (their notebooks don't suppress pip noise by
-    # convention). Plain locale fix + installs.
+    # Kaggle: same recipe, no %%capture (Kaggle convention is to show output).
     return textwrap.dedent("""\
-        # Install Unsloth and friends — Kaggle.
+        # Install Unsloth — Kaggle.
         # Note: Kaggle T4×2 sessions expose 2 GPUs, but a vanilla notebook only
         # uses one. To actually use both, save this code as train.py and run
         # `!torchrun --nproc_per_node=2 train.py` — Unsloth auto-enables DDP
@@ -103,9 +117,11 @@ def cell_install(platform: Platform) -> str:
         import locale
         locale.getpreferredencoding = lambda: "UTF-8"
         !pip install --quiet --upgrade pip
-        !pip install --quiet --upgrade "unsloth @ git+https://github.com/unslothai/unsloth.git"
-        !pip install --quiet --upgrade --no-deps "trl<0.10" peft accelerate bitsandbytes
-        !pip install --quiet --upgrade "huggingface_hub>=0.25" datasets tomli_w
+        !pip install --quiet --upgrade unsloth
+        !pip install --quiet --upgrade --no-deps --force-reinstall \\
+            "unsloth @ git+https://github.com/unslothai/unsloth.git" \\
+            "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git"
+        !pip install --quiet --upgrade "huggingface_hub>=0.25" tomli_w
         """)
 
 
