@@ -56,8 +56,8 @@ Four sizes covering hobbyist hardware up to a single H100. All four are finetune
    │ 11434       │         │  (httpx)       │         │  fetch → bridge         │
    └─────────────┘         └────────────────┘         └─────────────────────────┘
           ▲
-          │ Modelfile (training/modelfiles/*.Modelfile)
-          │ uses GGUF Q4_K_M produced by training notebook
+          │ Modelfile + GGUF Q4_K_M produced by the training notebook
+          │ (Unsloth auto-generates the Modelfile alongside the GGUF)
 ```
 
 ### Request flow
@@ -103,7 +103,6 @@ training/        # Unsloth finetuning
   shared/         - dataset loader, chat-template wiring, async Hub checkpointing
   colab/          - 4 notebooks, one per variant, ready to open in Colab
   kaggle/         - 4 notebooks, one per variant, ready to open in Kaggle
-  modelfiles/     - Ollama Modelfile per variant (used after training)
   _build_notebooks.py - regenerates the .ipynb files from the templates
 
 docs/            - architecture.md, training.md

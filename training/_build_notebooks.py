@@ -22,21 +22,37 @@ class Variant:
     slug: str               # genesiss-4b
     base: str               # unsloth/Qwen3.5-4B  or  unsloth/gpt-oss-20b
     family: Literal["qwen3.5", "gpt-oss"]
-    # Defaults; per-platform overrides applied below.
-    max_seq_length: int = 2048
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 4
-    lora_r: int = 16
+    # Per-variant defaults — picked to hit Unsloth's LoRA-hyperparameter guide
+    # recommendation of effective batch size ≈ 16 (batch_size × grad_accum) on
+    # the smallest realistic GPU for each variant.
+    #
+    # max_seq_length is set well above the dataset's natural distribution
+    # (~99% of Text-to-CadQuery rows < 4k tokens) so prompts describing
+    # multi-part assemblies don't get truncated at inference time, but stays
+    # within the activation budget of free-tier GPUs.
+    max_seq_length: int = 8192
+    per_device_train_batch_size: int = 2
+    gradient_accumulation_steps: int = 8           # eff. batch = 16
+    lora_r: int = 16                               # Unsloth canonical for Qwen 3.5
     lora_alpha: int = 16
     learning_rate: float = 2e-4
     save_steps: int = 100
 
 
+# Per-variant tweaks. gpt-oss canonical recipe uses r=8 / α=16; the bigger
+# Qwen variants need smaller per-device batches to fit.
 VARIANTS = [
     Variant("genesiss-4b",  "unsloth/Qwen3.5-4B",  "qwen3.5"),
-    Variant("genesiss-9b",  "unsloth/Qwen3.5-9B",  "qwen3.5"),
-    Variant("genesiss-20b", "unsloth/gpt-oss-20b", "gpt-oss"),
-    Variant("genesiss-27b", "unsloth/Qwen3.5-27B", "qwen3.5"),
+    Variant("genesiss-9b",  "unsloth/Qwen3.5-9B",  "qwen3.5",
+            per_device_train_batch_size=1, gradient_accumulation_steps=16),
+    Variant("genesiss-20b", "unsloth/gpt-oss-20b", "gpt-oss",
+            per_device_train_batch_size=1, gradient_accumulation_steps=16,
+            lora_r=8, lora_alpha=16),
+    # 27B 16-bit LoRA is memory-bound — drop context to keep effective batch
+    # at 16 without going OOM on a single H100.
+    Variant("genesiss-27b", "unsloth/Qwen3.5-27B", "qwen3.5",
+            max_seq_length=4096,
+            per_device_train_batch_size=1, gradient_accumulation_steps=16),
 ]
 
 
@@ -257,12 +273,14 @@ def cell_trainer() -> str:
                 dataset_text_field = "text",
                 per_device_train_batch_size = PER_DEVICE_TRAIN_BATCH_SIZE,
                 gradient_accumulation_steps = GRADIENT_ACCUMULATION_STEPS,
-                warmup_steps = 20,
+                # Unsloth LoRA hyperparam guide: warmup 5-10% of total steps,
+                # weight_decay 0.01, linear scheduler, adamw_8bit.
+                warmup_ratio = 0.05,
                 num_train_epochs = NUM_EPOCHS,
                 learning_rate = LEARNING_RATE,
                 logging_steps = 10,
                 optim = "adamw_8bit",
-                weight_decay = 0.0,
+                weight_decay = 0.01,
                 lr_scheduler_type = "linear",
                 seed = 3407,
                 # Save every SAVE_STEPS — the HubCheckpointCallback async-pushes
@@ -290,34 +308,78 @@ def cell_train() -> str:
 
 
 def cell_export(v: Variant) -> str:
-    return textwrap.dedent(f"""\
-        # ---- export -------------------------------------------------------------
-        # 1) Push merged 16-bit weights (for HF inference, vLLM, transformers).
-        model.push_to_hub_merged(
-            HUB_FINAL_REPO,
-            tokenizer,
-            save_method = "merged_16bit",
-            token = os.environ["HF_TOKEN"],
-        )
+    if v.family == "qwen3.5":
+        # Qwen 3.5: save_pretrained_gguf is the canonical Unsloth path. It
+        # writes the GGUF *and* an auto-generated Modelfile (with the exact
+        # chat template the model was trained on) into the same folder.
+        body = textwrap.dedent("""\
+            # 1) Push merged 16-bit weights for HF inference / vLLM / transformers.
+            model.push_to_hub_merged(
+                HUB_FINAL_REPO, tokenizer,
+                save_method = "merged_16bit",
+                token = os.environ["HF_TOKEN"],
+            )
 
-        # 2) GGUF Q4_K_M for Ollama.  Drop this next to {v.slug}.Modelfile, then:
-        #    ollama create {v.slug} -f {v.slug}.Modelfile
-        model.save_pretrained_gguf(
-            f"./gguf-{{VARIANT}}",
-            tokenizer,
-            quantization_method = "q4_k_m",
-        )
+            # 2) GGUF + auto-generated Modelfile (Unsloth writes both into the
+            #    same directory; the Modelfile bakes in the trained chat template).
+            GGUF_DIR = f"./gguf-{VARIANT}"
+            model.save_pretrained_gguf(
+                GGUF_DIR, tokenizer,
+                quantization_method = "q4_k_m",
+            )
+            # Optional: peek at the auto-generated Modelfile.
+            print(open(f"{GGUF_DIR}/Modelfile").read())
+            """)
+    else:
+        # gpt-oss-20b: per Unsloth's gpt-oss fine-tune tutorial, GGUF is built
+        # by cloning llama.cpp and running convert_hf_to_gguf.py on the merged
+        # weights. save_pretrained_gguf doesn't support gpt-oss's MoE layout.
+        body = textwrap.dedent("""\
+            # 1) Save + push merged 16-bit weights.
+            MERGED_DIR = f"./merged-{VARIANT}"
+            model.save_pretrained_merged(MERGED_DIR, tokenizer)
+            model.push_to_hub_merged(
+                HUB_FINAL_REPO, tokenizer,
+                token = os.environ["HF_TOKEN"],
+            )
 
-        # 3) Also push the GGUF to the Hub so the CLI's `genesiss models pull` can find it.
+            # 2) gpt-oss MoE requires the llama.cpp convert path (Unsloth's
+            #    save_pretrained_gguf doesn't support it). Build llama.cpp,
+            #    convert, then quantize to Q4_K_M.
+            !git clone --depth 1 https://github.com/ggml-org/llama.cpp
+            !cd llama.cpp && cmake -B build && cmake --build build --config Release -j
+            GGUF_DIR = f"./gguf-{VARIANT}"
+            import os; os.makedirs(GGUF_DIR, exist_ok=True)
+            !python3 llama.cpp/convert_hf_to_gguf.py {MERGED_DIR} --outfile {GGUF_DIR}/model-f16.gguf --outtype f16
+            !./llama.cpp/build/bin/llama-quantize {GGUF_DIR}/model-f16.gguf {GGUF_DIR}/model-q4_k_m.gguf Q4_K_M
+
+            # 3) Write the Modelfile next to the GGUF using Unsloth's auto-generated
+            #    template (matches what we trained on).
+            mf = tokenizer._ollama_modelfile.replace(
+                "{__FILE_LOCATION__}", f"./model-q4_k_m.gguf"
+            )
+            with open(f"{GGUF_DIR}/Modelfile", "w") as f:
+                f.write(mf)
+            print(mf)
+            """)
+
+    return body + textwrap.dedent("""\
+
+        # 3) Push GGUF + Modelfile to the Hub so `genesiss models pull` can
+        #    download them locally and `ollama create` from there.
         from huggingface_hub import HfApi
         api = HfApi(token=os.environ["HF_TOKEN"])
         api.upload_folder(
-            folder_path = f"./gguf-{{VARIANT}}",
+            folder_path = GGUF_DIR,
             repo_id = HUB_FINAL_REPO,
             repo_type = "model",
             path_in_repo = "gguf",
-            commit_message = "merged GGUF Q4_K_M",
+            commit_message = "GGUF Q4_K_M + Modelfile",
         )
+
+        print(f"\\nDone. To use locally:")
+        print(f"  genesiss models pull {VARIANT}")
+        print(f"  ollama run {VARIANT}")
         """)
 
 

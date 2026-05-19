@@ -68,16 +68,17 @@ This is why you'll see two repos per variant:
 
 ## Export → Ollama
 
-After training, the export cell calls:
+The Modelfile that Ollama needs is **not** hand-written — Unsloth generates one with the trained chat template baked in. For the Qwen 3.5 variants, `save_pretrained_gguf` writes the GGUF and Modelfile into the same directory in one shot:
+
 ```python
 model.push_to_hub_merged(repo, tokenizer, save_method="merged_16bit", token=...)
 model.save_pretrained_gguf(f"./gguf-{variant}", tokenizer, quantization_method="q4_k_m")
+# → ./gguf-{variant}/{variant}-Q4_K_M.gguf  +  ./gguf-{variant}/Modelfile
 ```
 
-Drop the resulting `*.Q4_K_M.gguf` next to `training/modelfiles/<variant>.Modelfile`, then:
-```bash
-ollama create genesiss-4b -f training/modelfiles/genesiss-4b.Modelfile
-```
+For **gpt-oss-20b**, `save_pretrained_gguf` doesn't support the MoE layout, so the gpt-oss notebook follows Unsloth's official gpt-oss tutorial: save merged weights, build llama.cpp, run `convert_hf_to_gguf.py`, quantize with `llama-quantize`, then write the Modelfile from `tokenizer._ollama_modelfile`.
+
+Both flows upload the resulting folder to `HUB_FINAL_REPO/gguf/`. On the user's machine, `genesiss models pull <variant>` (TODO) downloads from there and runs `ollama create <variant> -f <local>/Modelfile`.
 
 That tag (`genesiss-4b:latest`) is what `genesiss.llm.models.REGISTRY` expects.
 

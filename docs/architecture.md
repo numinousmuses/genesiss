@@ -32,8 +32,8 @@
    │ 11434       │         │  (httpx)       │         │  fetch → bridge         │
    └─────────────┘         └────────────────┘         └─────────────────────────┘
           ▲
-          │ Modelfile (training/modelfiles/*.Modelfile)
-          │ uses GGUF Q4_K_M produced by training notebook
+          │ Modelfile + GGUF Q4_K_M produced by the training notebook
+          │ (Unsloth auto-generates the Modelfile alongside the GGUF)
 ```
 
 ## Pieces
