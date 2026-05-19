@@ -37,6 +37,18 @@ class Variant:
     lora_alpha: int = 16
     learning_rate: float = 2e-4
     save_steps: int = 100
+    # Gradient checkpointing mode:
+    #   True       → HuggingFace standard: recompute activations on backward,
+    #                no CPU offload. Fastest path that still saves memory.
+    #   "unsloth"  → Unsloth's offload-heavy mode: 30% less GPU memory than
+    #                True but moves gradients to CPU between steps — adds
+    #                2-3× per-step overhead. Only worth it when memory is
+    #                actually tight.
+    #   False      → No checkpointing: fastest possible step, ~2× the memory
+    #                of True.
+    # Default True. Override to "unsloth" for the 27B variant where 16-bit
+    # LoRA at H100 budget is genuinely memory-constrained.
+    gradient_checkpointing: object = True
 
 
 # Per-variant tweaks. gpt-oss canonical recipe uses r=8 / α=16; the bigger
@@ -50,9 +62,11 @@ VARIANTS = [
             lora_r=8, lora_alpha=16),
     # 27B 16-bit LoRA is memory-bound — the 4096 default fits comfortably on
     # a single H100; per-device batch stays at 1 because the weights alone
-    # already eat most of the 80GB budget.
+    # already eat most of the 80GB budget. Use the offload-heavy checkpointing
+    # mode here since memory genuinely is tight.
     Variant("genesiss-27b", "unsloth/Qwen3.5-27B", "qwen3.5",
-            per_device_train_batch_size=1, gradient_accumulation_steps=16),
+            per_device_train_batch_size=1, gradient_accumulation_steps=16,
+            gradient_checkpointing="unsloth"),
 ]
 
 
@@ -105,9 +119,15 @@ def cell_install(platform: Platform) -> str:
                 "unsloth @ git+https://github.com/unslothai/unsloth.git" \\
                 "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git"
             # Step 3: extras we use directly (not in unsloth's deps).
-            # `kernels` lets gpt-oss use FA3 (kernels-community/vllm-flash-attn3) —
-            # it's a no-op for Qwen 3.5 but makes 20B vastly faster on H100/A100.
+            # - `flash-attn`: enables FA2 on Ampere/Hopper for Qwen 3.5. Best-effort:
+            #   if the pre-built wheel matches the runtime, install is ~1 min; if
+            #   it has to compile, ~10-15 min. On Blackwell the wheel won't build
+            #   and pip will fail — wrapped in `|| true` so the install cell
+            #   doesn't abort; auto-detect falls back to xformers cleanly.
+            # - `kernels`: lets gpt-oss use FA3 (kernels-community/vllm-flash-attn3)
+            #   on Hopper. No-op for Qwen 3.5 or non-Hopper but harmless to install.
             !pip install --upgrade --quiet "huggingface_hub>=0.25" tomli_w kernels
+            !pip install --quiet --no-build-isolation flash-attn || echo "[install] flash-attn skipped (no wheel for this runtime)"
             """)
     # Kaggle: same recipe, no %%capture (Kaggle convention is to show output).
     return textwrap.dedent("""\
@@ -123,7 +143,9 @@ def cell_install(platform: Platform) -> str:
         !pip install --quiet --upgrade --no-deps --force-reinstall \\
             "unsloth @ git+https://github.com/unslothai/unsloth.git" \\
             "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git"
-        !pip install --quiet --upgrade "huggingface_hub>=0.25" tomli_w
+        # See Colab install cell for what these add (FA2 on Ampere/Hopper, FA3 on Hopper).
+        !pip install --quiet --upgrade "huggingface_hub>=0.25" tomli_w kernels
+        !pip install --quiet --no-build-isolation flash-attn || echo "[install] flash-attn skipped (no wheel for this runtime)"
         """)
 
 
@@ -248,6 +270,11 @@ def cell_config(v: Variant, platform: Platform) -> str:
         LORA_ALPHA                   = {v.lora_alpha}
         LEARNING_RATE                = {v.learning_rate}
         SAVE_STEPS                   = {v.save_steps}
+        # See Variant dataclass for the meaning of values here.
+        # True = HF standard (recommended for 4B/9B/20B on 80GB).
+        # "unsloth" = aggressive offload mode (for 27B-class memory pressure).
+        # False = no checkpointing (fastest, ~2× memory of True).
+        GRADIENT_CHECKPOINTING       = {v.gradient_checkpointing!r}
         # Unsloth LoRA guide says 1-3 epochs with diminishing returns past 3.
         # One epoch of the combined ~332k-row dataset is already a LOT of
         # supervision — typical SFT runs use far less. Bump to 2 only if you
@@ -370,7 +397,7 @@ def cell_load_model(v: Variant) -> str:
             lora_alpha = LORA_ALPHA,
             lora_dropout = 0,
             bias = "none",
-            use_gradient_checkpointing = "unsloth",
+            use_gradient_checkpointing = GRADIENT_CHECKPOINTING,
             random_state = 3407,
             max_seq_length = MAX_SEQ_LENGTH,
         )
