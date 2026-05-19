@@ -263,9 +263,13 @@ def cell_load_model(v: Variant) -> str:
 
 def cell_dataset() -> str:
     return textwrap.dedent("""\
-        # Load Text-to-CadQuery (ricemonster/NeurIPS11092) and convert to a `text`
-        # column ready for SFTTrainer. MAX_TRAIN/MAX_EVAL come from the run-config
-        # cell — MAX_TRAIN=None means the full 90% split (~150k rows).
+        # Load both training sources by default:
+        #   - ricemonster/NeurIPS11092 (~170k, Text2CAD-derived, license unspecified)
+        #   - gudo7208/CAD-Coder       (~250k, Apache-2.0, ChatML messages format)
+        # Both are normalized to the same `messages` column, concatenated, and
+        # shuffled with a fixed seed (see training/shared/data_loader.py).
+        # MAX_TRAIN/MAX_EVAL come from the run-config cell — MAX_TRAIN=None means
+        # use the full combined train set (~380k rows after concatenation).
         from shared.data_loader import load_dataset_dict
         from shared.format import text_field
 

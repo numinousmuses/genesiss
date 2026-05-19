@@ -1,20 +1,29 @@
-"""Load the Text-to-CadQuery dataset.
+"""Load and combine CadQuery training datasets.
 
-Source: huggingface.co/ricemonster/NeurIPS11092 — JSONL files
-    data_train.jsonl  (90%)
-    data_val.jsonl    (5%)
-    data_test.jsonl   (5%)
-Each row has two fields: `input` (natural-language prompt) and `output` (CadQuery code).
+We support multiple sources, all normalized to a single `messages` column
+(ChatML-style: list of `{role, content}`). They get concatenated + shuffled
+before splitting, so the model doesn't see one source then the other.
 
-We download the JSONL files, then return a datasets.DatasetDict whose splits
-already contain a `messages` column ready for `apply_chat_template`.
+Currently supported sources:
+
+  ricemonster/NeurIPS11092  (170k, license unspecified — academic use)
+      JSONL files with {input, output} pairs. Converted to a 3-turn
+      conversation: system (our prompt) + user (input) + assistant (output).
+
+  gudo7208/CAD-Coder  (250k, Apache-2.0)
+      Already ChatML. We prepend our system prompt for consistency at
+      inference, since this source doesn't ship with one.
+
+Use `load_dataset_dict()` from the notebooks — the default uses both
+sources combined.
 """
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
-DEFAULT_REPO = "ricemonster/NeurIPS11092"
+DATASET_RICEMONSTER = "ricemonster/NeurIPS11092"
+DATASET_CADCODER = "gudo7208/CAD-Coder"
+DEFAULT_DATASETS: tuple[str, ...] = (DATASET_RICEMONSTER, DATASET_CADCODER)
 
 SYSTEM_PROMPT = (
     "You are Genesiss, a CAD assistant. "
@@ -24,23 +33,27 @@ SYSTEM_PROMPT = (
 )
 
 
-def download_jsonl(repo_id: str = DEFAULT_REPO, cache_dir: Optional[str] = None) -> dict[str, str]:
-    """Download the 3 JSONL files via huggingface_hub.hf_hub_download. Returns local paths."""
+# ---------------------------------------------------------------------------
+# ricemonster/NeurIPS11092 — raw JSONL files
+# ---------------------------------------------------------------------------
+def _download_ricemonster_jsonl(cache_dir: Optional[str] = None) -> dict[str, str]:
     from huggingface_hub import hf_hub_download
 
     out: dict[str, str] = {}
     for split, fname in [
         ("train", "data_train.jsonl"),
-        ("val", "data_val.jsonl"),
-        ("test", "data_test.jsonl"),
+        ("validation", "data_val.jsonl"),
     ]:
         out[split] = hf_hub_download(
-            repo_id=repo_id, filename=fname, repo_type="dataset", cache_dir=cache_dir
+            repo_id=DATASET_RICEMONSTER,
+            filename=fname,
+            repo_type="dataset",
+            cache_dir=cache_dir,
         )
     return out
 
 
-def _row_to_messages(row: dict) -> dict:
+def _ricemonster_row_to_messages(row: dict) -> dict:
     return {
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -50,35 +63,109 @@ def _row_to_messages(row: dict) -> dict:
     }
 
 
+def _load_ricemonster(cache_dir: Optional[str] = None):
+    from datasets import load_dataset
+
+    files = _download_ricemonster_jsonl(cache_dir=cache_dir)
+    ds = load_dataset(
+        "json",
+        data_files={"train": files["train"], "validation": files["validation"]},
+    )
+    train_cols = list(ds["train"].column_names)
+    return ds.map(_ricemonster_row_to_messages, remove_columns=train_cols)
+
+
+# ---------------------------------------------------------------------------
+# gudo7208/CAD-Coder — already in ChatML messages format
+# ---------------------------------------------------------------------------
+def _cadcoder_row_to_messages(row: dict) -> dict:
+    msgs = list(row["messages"])
+    # Prepend our system prompt so inference behavior matches what the
+    # ricemonster-derived rows trained on. Skip if the source already has one.
+    if not msgs or msgs[0].get("role") != "system":
+        msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + msgs
+    return {"messages": msgs}
+
+
+def _load_cadcoder(cache_dir: Optional[str] = None):
+    from datasets import load_dataset
+
+    ds = load_dataset(DATASET_CADCODER, cache_dir=cache_dir)
+    # CAD-Coder ships train/validation/test; we only need train+validation.
+    keep = {k: ds[k] for k in ("train", "validation") if k in ds}
+    from datasets import DatasetDict
+
+    out = DatasetDict(keep)
+    train_cols = list(out["train"].column_names)
+    return out.map(_cadcoder_row_to_messages, remove_columns=train_cols)
+
+
+# ---------------------------------------------------------------------------
+# Combined loader
+# ---------------------------------------------------------------------------
+_LOADERS = {
+    DATASET_RICEMONSTER: _load_ricemonster,
+    DATASET_CADCODER: _load_cadcoder,
+}
+
+
 def load_dataset_dict(
-    repo_id: str = DEFAULT_REPO,
+    datasets: Iterable[str] = DEFAULT_DATASETS,
     cache_dir: Optional[str] = None,
     max_train: Optional[int] = None,
     max_eval: Optional[int] = None,
+    seed: int = 3407,
 ):
-    """Return a DatasetDict with `train` + `validation` splits, each with a `messages` column.
+    """Return a DatasetDict with `train` + `validation` splits.
 
-    `max_train` / `max_eval` truncate splits for quick sanity runs.
+    Each split has exactly one column, `messages`, ready for the chat
+    template to render.
+
+    `datasets` selects which sources to combine. Default is both
+    ricemonster/NeurIPS11092 and gudo7208/CAD-Coder.
+    `max_train` / `max_eval` truncate splits for sanity-check runs.
     """
-    from datasets import load_dataset
+    from datasets import DatasetDict, concatenate_datasets
 
-    files = download_jsonl(repo_id=repo_id, cache_dir=cache_dir)
-    ds = load_dataset(
-        "json",
-        data_files={"train": files["train"], "validation": files["val"]},
-    )
-    if max_train is not None:
-        ds["train"] = ds["train"].select(range(min(max_train, len(ds["train"]))))
-    if max_eval is not None:
-        ds["validation"] = ds["validation"].select(
-            range(min(max_eval, len(ds["validation"])))
+    datasets = tuple(datasets)
+    if not datasets:
+        raise ValueError("at least one dataset name is required")
+
+    train_parts, val_parts = [], []
+    for name in datasets:
+        if name not in _LOADERS:
+            raise ValueError(f"unknown dataset {name!r}. Known: {sorted(_LOADERS)}")
+        d = _LOADERS[name](cache_dir=cache_dir)
+        train_parts.append(d["train"])
+        val_parts.append(d["validation"])
+        print(
+            f"[data] {name}: train={len(d['train']):,}  val={len(d['validation']):,}"
         )
-    ds = ds.map(_row_to_messages, remove_columns=[c for c in ds["train"].column_names])
-    return ds
+
+    train = (
+        concatenate_datasets(train_parts) if len(train_parts) > 1 else train_parts[0]
+    )
+    val = concatenate_datasets(val_parts) if len(val_parts) > 1 else val_parts[0]
+
+    # Shuffle the combined train set so the model doesn't see one source then
+    # the next. Val is small enough that order doesn't really matter, but
+    # shuffle it too for cheap insurance.
+    train = train.shuffle(seed=seed)
+    val = val.shuffle(seed=seed)
+
+    if max_train is not None:
+        train = train.select(range(min(max_train, len(train))))
+    if max_eval is not None:
+        val = val.select(range(min(max_eval, len(val))))
+
+    print(f"[data] combined: train={len(train):,}  val={len(val):,}")
+    return DatasetDict({"train": train, "validation": val})
 
 
+# Legacy alias kept for any notebook still calling the old name.
 def apply_chat_template(ds, tokenizer):
-    """Render the `messages` column to a `text` column using the tokenizer's chat template."""
+    """Render the `messages` column to a `text` column. Prefer
+    `training.shared.format.text_field` in new code."""
     def _fmt(batch):
         return {
             "text": [
@@ -86,4 +173,5 @@ def apply_chat_template(ds, tokenizer):
                 for m in batch["messages"]
             ]
         }
+
     return ds.map(_fmt, batched=True, remove_columns=["messages"])

@@ -5,13 +5,26 @@ Notebooks for finetuning each genesiss variant with Unsloth. Two parallel sets:
 ```
 training/
 ├── shared/                         # helpers used by all notebooks
-│   ├── data_loader.py              # downloads ricemonster/NeurIPS11092 + builds messages
+│   ├── data_loader.py              # downloads + concatenates dataset sources
 │   ├── format.py                   # apply_chat_template + train_on_responses_only wiring
 │   └── checkpoint.py               # resume-from-Hub + async background uploads
 ├── colab/                          # for Google Colab
 ├── kaggle/                         # for Kaggle
 └── _build_notebooks.py             # regenerates the .ipynb files from the templates
 ```
+
+## Datasets
+
+By default the notebooks train on **both** of these, concatenated + shuffled:
+
+| Source | Rows | License | Format |
+| ------ | ---- | ------- | ------ |
+| `ricemonster/NeurIPS11092` | ~170k | Unspecified (academic-use convention) | `{input, output}` JSONL |
+| `gudo7208/CAD-Coder` | ~250k | **Apache-2.0** | ChatML `messages` |
+
+Both are normalized to a single `messages` column with our standard system prompt, then concatenated and shuffled with a fixed seed (3407). To use only one of them, pass `datasets=("gudo7208/CAD-Coder",)` to `load_dataset_dict()` in the dataset cell.
+
+Held-out evaluation worth doing separately (not yet wired up): `BenchCAD/BenchCAD code_gen` (17.9k, Apache-2.0).
 
 The Modelfile used by Ollama is **auto-generated** by Unsloth during export (it
 ships inside the same folder as the GGUF, with the exact chat template the
