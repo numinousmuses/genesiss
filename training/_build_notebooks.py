@@ -119,15 +119,16 @@ def cell_install(platform: Platform) -> str:
                 "unsloth @ git+https://github.com/unslothai/unsloth.git" \\
                 "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git"
             # Step 3: extras we use directly (not in unsloth's deps).
-            # - `flash-attn`: enables FA2 on Ampere/Hopper for Qwen 3.5. Best-effort:
-            #   if the pre-built wheel matches the runtime, install is ~1 min; if
-            #   it has to compile, ~10-15 min. On Blackwell the wheel won't build
-            #   and pip will fail — wrapped in `|| true` so the install cell
-            #   doesn't abort; auto-detect falls back to xformers cleanly.
             # - `kernels`: lets gpt-oss use FA3 (kernels-community/vllm-flash-attn3)
             #   on Hopper. No-op for Qwen 3.5 or non-Hopper but harmless to install.
+            #
+            # We do NOT install `flash-attn` — Unsloth's official notebooks don't
+            # either. xformers is their supported attention path on Ampere/Hopper,
+            # and the flash-attn build from source (no pre-built wheel for current
+            # Colab torch+CUDA combo) routinely takes 25+ minutes. The big speed
+            # lever for our workload is GRADIENT_CHECKPOINTING (see run-config),
+            # not FA2 vs xformers.
             !pip install --upgrade --quiet "huggingface_hub>=0.25" tomli_w kernels
-            !pip install --quiet --no-build-isolation flash-attn || echo "[install] flash-attn skipped (no wheel for this runtime)"
             """)
     # Kaggle: same recipe, no %%capture (Kaggle convention is to show output).
     return textwrap.dedent("""\
@@ -143,9 +144,8 @@ def cell_install(platform: Platform) -> str:
         !pip install --quiet --upgrade --no-deps --force-reinstall \\
             "unsloth @ git+https://github.com/unslothai/unsloth.git" \\
             "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo.git"
-        # See Colab install cell for what these add (FA2 on Ampere/Hopper, FA3 on Hopper).
+        # See Colab install cell for the rationale. Notably: NO flash-attn.
         !pip install --quiet --upgrade "huggingface_hub>=0.25" tomli_w kernels
-        !pip install --quiet --no-build-isolation flash-attn || echo "[install] flash-attn skipped (no wheel for this runtime)"
         """)
 
 
