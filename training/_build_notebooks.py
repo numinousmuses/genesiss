@@ -469,6 +469,13 @@ def cell_trainer() -> str:
                 eval_steps = SAVE_STEPS,
                 report_to = "none",
                 dataset_num_proc = 2,
+                # Length-grouped batching: orders examples so each batch holds
+                # similar-length sequences, collapsing padding waste (our median
+                # is 656 tokens but max_seq_length is 4096). Unlike `packing`,
+                # every NL→code example stays a complete, intact unit — no
+                # splitting CADQuery scripts across batch boundaries, no
+                # concatenating unrelated CAD tasks. ~2.5× less wasted compute.
+                group_by_length = True,
             ),
             callbacks = [hub_cb, budget_cb],
         )
