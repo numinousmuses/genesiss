@@ -256,12 +256,23 @@ def cell_config(v: Variant, platform: Platform) -> str:
         # HF user (override if forking).
         HF_USER       = "numinousmuses"
 
-        # Where checkpoints live on the Hub.  Each `checkpoint-XXXX` folder is a
+        # ---- run version --------------------------------------------------------
+        # Toggle this to switch dataset size + output repos. v1 and v2 train into
+        # SEPARATE repos so they never collide (separate checkpoint repos too, so
+        # resuming one never picks up the other's checkpoints).
+        #   "v1" →  50,000 training examples  →  {{HF_USER}}/{{VARIANT}}-v1
+        #   "v2" → 100,000 training examples  →  {{HF_USER}}/{{VARIANT}}-v2
+        RUN_VERSION   = "v1"
+
+        _VERSION_MAX_TRAIN = {{"v1": 50_000, "v2": 100_000}}
+        assert RUN_VERSION in _VERSION_MAX_TRAIN, f"unknown RUN_VERSION {{RUN_VERSION!r}}"
+
+        # Where checkpoints live on the Hub. Each `checkpoint-XXXX` folder is a
         # full Trainer save (model.safetensors, optimizer.pt, scheduler.pt,
         # trainer_state.json, etc.) so we can resume mid-step.
-        HUB_CKPT_REPO  = f"{{HF_USER}}/{{VARIANT}}-checkpoints"
+        HUB_CKPT_REPO  = f"{{HF_USER}}/{{VARIANT}}-{{RUN_VERSION}}-checkpoints"
         # Final merged model / GGUF goes here.
-        HUB_FINAL_REPO = f"{{HF_USER}}/{{VARIANT}}"
+        HUB_FINAL_REPO = f"{{HF_USER}}/{{VARIANT}}-{{RUN_VERSION}}"
 
         MAX_SEQ_LENGTH               = {v.max_seq_length}
         PER_DEVICE_TRAIN_BATCH_SIZE  = {bs}{note}
@@ -281,10 +292,10 @@ def cell_config(v: Variant, platform: Platform) -> str:
         # have headroom in your compute-units budget after a 1-epoch baseline.
         NUM_EPOCHS                   = 1
 
-        # Sanity-check knob. Set to e.g. 5000 for a quick 10-minute run to
-        # verify the pipeline before spending compute units on the full
-        # ~380k-row combined train split. Set back to None for production.
-        MAX_TRAIN                    = None
+        # Training-set size is driven by RUN_VERSION (see above): v1=50k, v2=100k.
+        # For a quick pipeline sanity check, hardcode a small int here instead
+        # (e.g. MAX_TRAIN = 5000) — overrides the version mapping.
+        MAX_TRAIN                    = _VERSION_MAX_TRAIN[RUN_VERSION]
         MAX_EVAL                     = 2000
 
         # Hard wall-clock budget per session. Colab's idle kick is ~24h on
